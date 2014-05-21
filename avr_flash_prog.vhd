@@ -40,16 +40,29 @@ entity avr_flash_prog is
     
     --The clock frequency at which the device is being run.
     --Handled by 
-    clock_frequency  : positive          := 32000000;
+    clock_frequency    : positive          := 32000000;
 
     --The bit rate at which the programmer will communnicate.
-    baud_rate        : positive          := 19200;
+    baud_rate          : positive          := 19200;
 
     --The signature of the microcontroller to report.
-    signature        : std_ulogic_vector := x"FFFFFF";
+    signature          : std_ulogic_vector := x"1E_97_01"; --ATmega103
+
+    --AVR-910 device code for the device being targeted.
+    device_id          : std_ulogic_vector := x"41"; --ATmega103
 
     --The "programmer type", as reported upon request.
-    programmer_type  : programmer_id     := (x"41", x"56", x"52", x"50", x"52", x"4F", x"47") --"AVRPROG"
+    --programmer_type    : programmer_id     := (x"41", x"56", x"52", x"50", x"52", x"4F", x"47"); --"AVRPROG"
+    programmer_type    : programmer_id     := (x"50", x"41", x"50", x"49", x"4C", x"49", x"4F"); --"PAPILIO"
+
+    --Hardware version.
+    --This should be overwritten to include your own hardware.
+    hardware_version   : std_ulogic_vector(15 downto 0) := x"3031";
+
+    --Bootloader version.
+    --Unless you have a good reason to; this should likely not be overridden,
+    --as this is the hardware ID of the bootloader.
+    bootloader_version : std_ulogic_vector(15 downto 0) := x"3032"
 
   );
   port(
@@ -74,6 +87,11 @@ entity avr_flash_prog is
 
     --CPU-related signals.
     in_programming_mode : buffer std_ulogic := '0'
+
+    --The current value of the low-fuse register.
+    --low_fuse_in         : std_ulogic_vector(7 downto 0) := x"AA";
+    --high_fuse_in        : std_ulogic_vector(7 downto 0) := x"BB";
+    --extended_fuse_in    : std_ulogic_vector(7 downto 0) := x"CC"
       
   );
 end avr_flash_prog;
@@ -90,18 +108,59 @@ architecture behavioral of avr_flash_prog is
   signal new_data_received, data_reciept_handled         : std_ulogic;
 
   -- FSM state type for the main controller.
-  type programmer_state_type is (WAIT_FOR_COMMAND, SEND_ID, RESPOND_TO_AUTO_INC_QUERY,
-                                 RECIEVE_ADDR_HIGH, RECIEVE_ADDR_LOW,
-                                 UNKNOWN_COMMAND, ACKNOWLEDGE_COMMAND, WAIT_FOR_TRANSMIT);
+  type programmer_state_type is (
+    WAIT_FOR_COMMAND, 
+    SEND_ID, 
+    SEND_VERSION_MSB, 
+    SEND_VERSION_LSB,
+    SEND_SIGNATURE_MIDDLE,
+    SEND_SIGNATURE_END,
+    RECEIVE_ADDR_HIGH, 
+    RECEIVE_ADDR_LOW,
+    RECEIVE_DEVICE_ID,
+    RECEIVE_UNIVERSAL_COMMAND,
+    PROCESS_UNIVERSAL_COMMAND,
+    ACKNOWLEDGE_COMMAND, 
+    TERMINATE_STRING_AND_RESTART,
+    WAIT_FOR_TRANSMIT
+  );
+  signal state                : programmer_state_type := WAIT_FOR_COMMAND;
 
 
-  signal state : programmer_state_type := WAIT_FOR_COMMAND;
+  --Special "target" register which stores the state to advance to after a transmit.
+  signal post_transmit_state  : programmer_state_type := WAIT_FOR_COMMAND;
 
+  --The version to be sent during the "send version" states.
+  signal version_to_transmit  : std_ulogic_vector(hardware_version'range) := (others => '0');
+
+  --
   -- "ID transmission" sub-fsm signals.
+  --
+
   signal programmer_id_character    : byte;
   signal position_in_programmer_id  : integer range 0 to 6 := 0;
   signal transmitting_programmer_id, transmitting_last_byte_of_programmer_id : std_ulogic;
 
+
+  --
+  --Signals for the "universal command" sub-FSM:
+  --
+
+  --Register which stores the full universal command that's been sent.
+  signal universal_command                 : std_ulogic_vector(31 downto 0);
+  signal universal_command_bytes_remaining : integer range 0 to 4 := 0; 
+  signal receiving_universal_command       : boolean;
+
+
+  --Universal (SPI) command constants.
+  constant READ_LOW_FUSE_COMMAND      : std_ulogic_vector(31 downto 0) := "010100000000000000000000--------";
+  constant READ_HIGH_FUSE_COMMAND     : std_ulogic_vector(31 downto 0) := "010110000000100000000000--------";
+  constant READ_EXTENDED_FUSE_COMMAND : std_ulogic_vector(31 downto 0) := "010100000000100000000000--------";
+
+  --Temporary, fixed constants 
+  constant low_fuse_in         : std_ulogic_vector(7 downto 0) := x"AA";
+  constant high_fuse_in        : std_ulogic_vector(7 downto 0) := x"BB";
+  constant extended_fuse_in    : std_ulogic_vector(7 downto 0) := x"CC";
 
 
 
@@ -162,6 +221,10 @@ begin
         --
         when WAIT_FOR_COMMAND =>
 
+          --Assume that we want the default behavior: after a transmit,
+          --we return to this "wait for command" state.
+          post_transmit_state <= WAIT_FOR_COMMAND;
+
           --If we've recieved new data...
           if new_data_received = '1' then
 
@@ -170,29 +233,139 @@ begin
          
             --... and move to the appropriate handler routine. 
             case received_data is
-              
+
+              --
               --"P": enter programmming mode.
+              --
               when x"50" =>
                 in_programming_mode <= '1';
                 state <= ACKNOWLEDGE_COMMAND;
 
+
+              --
+              --"L": leave programming mode
+              --
+              when x"4C" =>
+                in_programming_mode <= '0';
+                state <= ACKNOWLEDGE_COMMAND;
+
+
+
               --"a": A query which determines whether the device supports auto-incrementation
               --     of addresses.
               when x"61" =>
-                state <= RESPOND_TO_AUTO_INC_QUERY;
+               
+                --Respond "Y", as we do support auto-increment.
+                data_to_transmit <= x"59";
+                state <= WAIT_FOR_TRANSMIT;
+
+
+              --
+              -- "b": Check for buffer support.
+              -- Currently, we do not support buffering. If we did, we would respond "Y", and then two bytes indicating buffer size.
+              --
+              when x"62" =>
+
+                --Respond "N", as we temporarily do not support buffering.
+                data_to_transmit <= x"4E";
+                state <= WAIT_FOR_TRANSMIT;
+
+              --
+              -- "p": Return the programmer type. We're a serial programmer, so respond with "s" for serial.
+              --
+              when x"70" =>
+                data_to_transmit <= x"73";
+                state <= WAIT_FOR_TRANSMIT;
+
 
               --"A": Set the current working address.
               when x"41" =>
-                state <= RECIEVE_ADDR_HIGH;
+                state <= RECEIVE_ADDR_HIGH;
 
 
-              --"S", send Programmer Type.
+              --"S", send Programmer ID.
               when x"53" => 
                 state <= SEND_ID;
 
+
+
+
+              --
+              -- 'v'
+              -- Host has requested the hardware version.
+              --
+              when x"76" =>
+
+                --Load the hardware version into the "version to transmit"
+                --register.
+                version_to_transmit <= hardware_version;
+
+                --... and move to the transmit version state.
+                state <= SEND_VERSION_MSB;
+
+              --              
+              --'V'
+              -- Host has requested the bootloader version.
+              --
+              when x"56" =>
+
+                --Load the bootloader version into the "version to transmit"
+                --register.
+                version_to_transmit <= bootloader_version;
+                state <= SEND_VERSION_MSB;
+
+              --
+              -- 't'
+              -- Host has requested that we send all supportde device IDs.
+              --
+              when x"74" =>
+
+                --Send the single "supported" device ID...
+                data_to_transmit    <= device_id;
+
+                --... followed by a null terminator. After we're finished, await the next command.
+                post_transmit_state <= TERMINATE_STRING_AND_RESTART;
+                state <= WAIT_FOR_TRANSMIT;
+
+              --
+              -- 'T'
+              -- Host is about to specify a device ID to use.
+              --
+              when x"54" =>
+                state <= RECEIVE_DEVICE_ID;
+
+
+              --
+              -- 's'
+              -- Host is requesting the microcontroller's signature.
+              --
+              when x"73" =>
+
+                --Send the first byte of the device's signature...
+                data_to_transmit <= signature(7 downto 0);
+                state <= WAIT_FOR_TRANSMIT;
+
+                ---... and continue to send the second byte of the device's signature.
+                post_transmit_state <= SEND_SIGNATURE_MIDDLE;
+
+
+              --
+              -- ".": Host is sending a new four-byte "universal" (SPI programmer) command.
+              --
+              when x"2E" =>
+
+                --Since we're using a four-byte command, set the "bytes to recieve" register to 4...
+                universal_command_bytes_remaining <= 4;
+
+                --... and move into the "receive" state.
+                state <= RECEIVE_UNIVERSAL_COMMAND;
+
+
               --In all other cases, respond with a question mark.
               when others =>
-                state <= UNKNOWN_COMMAND;
+                data_to_transmit <= x"3F"; -- "?"
+                state <= WAIT_FOR_TRANSMIT;
+
             end case;
 
           end if;
@@ -221,14 +394,59 @@ begin
 
 
         --
-        -- Acknowledge valid command.
-        -- A valid command has been completed; send back an acknowledgement.
+        -- Send the most-significant-byte of the hardwaver version.
         --
-        when RESPOND_TO_AUTO_INC_QUERY =>
+        when SEND_VERSION_MSB =>
 
-          --Respond with a capital 'Y', indicating that we do support auto-incrementation.
-          data_to_transmit <= x"59";
-          request_transmit <= '1';
+          --Transmit the MSB of the hardware version...
+          data_to_transmit <= version_to_transmit(15 downto 8);
+          --request_transmit <= '1';
+
+          --... and then move on to the LSB of the version.
+          --after the transmit completes.
+          post_transmit_state <= SEND_VERSION_LSB;
+          state <= WAIT_FOR_TRANSMIT;
+
+
+        --
+        -- Send the least-significant-byte of the hardwaver version.
+        --
+        when SEND_VERSION_LSB =>
+
+          --Transmit the LSB of the hardware version...
+          data_to_transmit <= version_to_transmit(7 downto 0);
+          --request_transmit <= '1';
+
+          --... and then wait for the next command.
+          post_transmit_state <= WAIT_FOR_COMMAND;
+          state <= WAIT_FOR_TRANSMIT;
+
+
+        --
+        -- Send the middle bye of the device's signature.
+        --
+        when SEND_SIGNATURE_MIDDLE =>
+
+          --Transmit the middle byte of the signature...
+          data_to_transmit <= signature(15 downto 8);
+          --request_transmit <= '1';
+
+          --... and continue to the last byte.
+          post_transmit_state <= SEND_SIGNATURE_END;
+          state <= WAIT_FOR_TRANSMIT;
+
+
+        --
+        -- Send the final bye of the device's signature.
+        --
+        when SEND_SIGNATURE_END =>
+
+          --Transmit the middle byte of the signature...
+          data_to_transmit <= signature(23 downto 16);
+          --request_transmit <= '1';
+
+          --... and wait for the next command.
+          post_transmit_state <= WAIT_FOR_COMMAND;
           state <= WAIT_FOR_TRANSMIT;
 
 
@@ -236,7 +454,7 @@ begin
         -- Recieve Address High.
         -- Recieve and set the target address's high bit.
         --
-        when RECIEVE_ADDR_HIGH =>
+        when RECEIVE_ADDR_HIGH =>
 
           -- Once we've received a byte of data,
           -- use it to set the high byte of the address, then
@@ -244,7 +462,7 @@ begin
           if new_data_received = '1' then
             address(15 downto 8) <= received_data;
             data_reciept_handled <= '1';
-            state <= RECIEVE_ADDR_LOW;
+            state <= RECEIVE_ADDR_LOW;
           end if;
              
 
@@ -252,7 +470,7 @@ begin
         -- Recieve Address High.
         -- Recieve and set the target address's high bit.
         --
-        when RECIEVE_ADDR_LOW =>
+        when RECEIVE_ADDR_LOW =>
 
           -- Once we've received a byte of data,
           -- use it to set the high byte of the address, then
@@ -264,17 +482,33 @@ begin
           end if;
 
 
-
         --
-        -- Recieved Unknown Command.
-        -- We've recieved an unknown command, and should respond with a '?'.
+        -- Receive Device ID.
+        -- Receive the target device ID from the host, and validate it.
         --
-        when UNKNOWN_COMMAND =>
+        when RECEIVE_DEVICE_ID =>
 
-          --Set up the UART to send back a '?'
-          data_to_transmit <= x"3F";
-          request_transmit <= '1';
-          state <= WAIT_FOR_TRANSMIT;
+
+          --Wait here until we've recieved a byte of data from the host.
+          --Once we've received a byte of data...
+          if new_data_received = '1' then
+
+            --Mark the recipet as handled, so the UART can continue.
+            data_reciept_handled <= '1';
+
+            --If we've recieved the suppored device id,
+            --acknowledge the command.
+            if received_data = device_id then
+              state <= ACKNOWLEDGE_COMMAND;
+
+            --Otherwise, return to waiting for a command.
+            --The programmer should time out.
+            else
+              state <= WAIT_FOR_COMMAND;
+            end if;
+
+          end if;
+
 
 
         --
@@ -283,10 +517,80 @@ begin
         --
         when ACKNOWLEDGE_COMMAND =>
 
+          --Ensure that we wind up back in the "wait for command" state
+          --after this given send.
+          post_transmit_state <= WAIT_FOR_COMMAND;
+
           --Set up the UART to send back a carriage return "\r".
-          data_to_transmit <= x"3F";
-          request_transmit <= '1';
+          data_to_transmit <= x"0D";
           state <= WAIT_FOR_TRANSMIT;
+
+
+        --
+        -- Terminates a string or list of bytes by sending the null character.
+        -- A valid command has been completed; send back an acknowledgement.
+        --
+        when TERMINATE_STRING_AND_RESTART =>
+
+          --Ensure that we wind up back in the "wait for command" state
+          --after this given send.
+          post_transmit_state <= WAIT_FOR_COMMAND;
+
+          --Set up the UART to send back a carriage return "\r".
+          data_to_transmit <= x"00";
+          state <= WAIT_FOR_TRANSMIT;
+
+
+        --
+        -- Recieve a universal (SPI) command from the host.
+        --
+        when RECEIVE_UNIVERSAL_COMMAND =>
+
+          --If we've just received a new byte of the command...
+          if new_data_received = '1' then
+
+            --Shift in the new byte...
+            universal_command <= universal_command(23 downto 0) & received_data;
+
+            --... decrease the total number of bytes left to recieve...
+            universal_command_bytes_remaining <= universal_command_bytes_remaining - 1;
+
+            --... and, if this was the last remaining byte, move to process the universal command.
+            if universal_command_bytes_remaining = 1 then
+              state <= PROCESS_UNIVERSAL_COMMAND;
+            end if;
+
+          end if;
+
+
+        --
+        -- Process (or delegate) a recieved universal command.
+        --
+        when PROCESS_UNIVERSAL_COMMAND =>
+
+          --Transmit the requested data, and then acknowledge the command.
+          state <= WAIT_FOR_TRANSMIT;
+          post_transmit_state <= ACKNOWLEDGE_COMMAND;
+
+
+          --If the universal command was a "read low fuse" command,
+          --read the low fuse.
+          if std_match(universal_command, READ_LOW_FUSE_COMMAND) then 
+            data_to_transmit <= low_fuse_in;
+
+          elsif std_match(universal_command, READ_HIGH_FUSE_COMMAND) then
+            data_to_transmit <= high_fuse_in;
+
+          elsif std_match(universal_command, READ_EXTENDED_FUSE_COMMAND) then
+            data_to_transmit <= extended_fuse_in;
+
+          
+          --If we don't recognize the command, move directly to the WAIT_FOR_COMMAND state.
+          else
+            state <= WAIT_FOR_COMMAND;
+          end if;
+
+
 
         
         --
@@ -303,12 +607,13 @@ begin
           --Once we've recieved an acknowledgement,
           --move to wait for our next command.
           if transmit_request_acknowledged = '1' then
-            state <= WAIT_FOR_COMMAND;
+            state <= post_transmit_state;
           end if;
 
       end case;
     end if;
   end process;
+
 
 
   --
