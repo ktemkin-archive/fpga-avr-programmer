@@ -83,7 +83,10 @@ entity avr_flash_prog is
     erase   : out std_ulogic;
 
     --TODO: Fix width.
-    address : out std_ulogic_vector(15 downto 0) := (others => '0');
+    address         : out std_ulogic_vector(15 downto 0) := (others => '0');
+    data_from_flash : in  std_ulogic_vector(15 downto 0);
+    data_to_flash   : out std_ulogic_vector(15 downto 0);
+    write_to_flash  : out std_ulogic;
 
     --CPU-related signals.
     in_programming_mode : buffer std_ulogic := '0'
@@ -119,6 +122,8 @@ architecture behavioral of avr_flash_prog is
     RECEIVE_ADDR_LOW,
     RECEIVE_DEVICE_ID,
     RECEIVE_UNIVERSAL_COMMAND,
+    RECEIVE_PROGRAM_BYTE_LOW,
+    RECEIVE_PROGRAM_BYTE_HIGH,
     PROCESS_UNIVERSAL_COMMAND,
     ACKNOWLEDGE_COMMAND, 
     TERMINATE_STRING_AND_RESTART,
@@ -213,6 +218,9 @@ begin
       request_transmit           <= '0';
       transmitting_programmer_id <= '0';
 
+      erase                      <= '0';
+      write_to_flash             <= '0';
+
       case state is
 
         --
@@ -250,9 +258,10 @@ begin
                 state <= ACKNOWLEDGE_COMMAND;
 
 
-
+              --
               --"a": A query which determines whether the device supports auto-incrementation
               --     of addresses.
+              --
               when x"61" =>
                
                 --Respond "Y", as we do support auto-increment.
@@ -277,18 +286,17 @@ begin
                 data_to_transmit <= x"73";
                 state <= WAIT_FOR_TRANSMIT;
 
-
-              --"A": Set the current working address.
+              --
+              --"A": Set the current "working address": the current address in (typically flash) memory.
+              --
               when x"41" =>
                 state <= RECEIVE_ADDR_HIGH;
 
-
-              --"S", send Programmer ID.
+              --
+              --"S": Send the programmer's ID string.
+              --
               when x"53" => 
                 state <= SEND_ID;
-
-
-
 
               --
               -- 'v'
@@ -328,16 +336,46 @@ begin
                 state <= WAIT_FOR_TRANSMIT;
 
               --
-              -- 'T'
-              -- Host is about to specify a device ID to use.
+              -- 'T': Specifies the device ID to be programmed.
               --
               when x"54" =>
                 state <= RECEIVE_DEVICE_ID;
 
 
               --
-              -- 's'
-              -- Host is requesting the microcontroller's signature.
+              -- 'e': Perform a full chip erase.
+              --
+              when x"65" =>
+
+                --Set the erase flag high for a single cycle.
+                erase <= '1';
+                state <= ACKNOWLEDGE_COMMAND;
+
+
+              --
+              -- 'c': Store the lower part of a program memory word, for wriitng.
+              --
+              when x"63" =>
+                state <= RECEIVE_PROGRAM_BYTE_LOW;
+
+              --
+              -- 'c': Store the lower part of a program memory word, for wriitng.
+              --
+              when x"43" =>
+                state <= RECEIVE_PROGRAM_BYTE_HIGH;
+
+
+              --
+              -- 'm': Perform a page write.
+              --
+              when x"6D" =>
+
+                --Since we're not actually writing to flash (at this stage), acknowledge all page
+                --writes, but don't do anything.
+                state <= ACKNOWLEDGE_COMMAND;
+
+              --
+              -- 's': -- Host requests the microcontroller's signature.
               --
               when x"73" =>
 
@@ -542,12 +580,57 @@ begin
 
 
         --
+        -- Handle receipt of the lower byte of a program memory word.
+        --
+        when RECEIVE_PROGRAM_BYTE_LOW =>
+
+          --Once we recieve a new byte of data.
+          if new_data_received = '1' then
+
+            data_reciept_handled <= '1';
+
+            --Place the given byte on the appropriate bits of the
+            --input to the program memory.
+            data_to_flash(7 downto 0) <= received_data;
+             
+            --... and acknowledge the command.
+            state <= ACKNOWLEDGE_COMMAND; 
+
+          end if;
+
+
+        --
+        -- Handle receipt of the lower byte of a program memory word.
+        --
+        when RECEIVE_PROGRAM_BYTE_HIGH =>
+
+          --Once we recieve a new byte of data.
+          if new_data_received = '1' then
+
+            data_reciept_handled <= '1';
+
+            --Place the given byte on the appropriate bits of the
+            --input to the program memory...
+            data_to_flash(15 downto 8) <= received_data;
+
+            --... and set up a flash write.
+            write_to_flash <= '1';
+             
+            --... and acknowledge the command.
+            state <= ACKNOWLEDGE_COMMAND; 
+
+          end if;
+
+
+        --
         -- Recieve a universal (SPI) command from the host.
         --
         when RECEIVE_UNIVERSAL_COMMAND =>
 
           --If we've just received a new byte of the command...
           if new_data_received = '1' then
+
+            data_reciept_handled <= '1';
 
             --Shift in the new byte...
             universal_command <= universal_command(23 downto 0) & received_data;
