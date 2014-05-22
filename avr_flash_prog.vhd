@@ -74,27 +74,23 @@ entity avr_flash_prog is
     --UART control interface.
     rx      : in  std_ulogic;
     tx      : out std_ulogic;
-  
-
-    --DEBUG only!
-    rx_mirror, tx_mirror : out std_ulogic;
 
     --Flash memory control I/O.
     erase   : out std_ulogic;
 
     --TODO: Fix width.
-    address         : out std_ulogic_vector(15 downto 0) := (others => '0');
+    address         : buffer std_ulogic_vector(15 downto 0) := (others => '0');
     data_from_flash : in  std_ulogic_vector(15 downto 0);
     data_to_flash   : out std_ulogic_vector(15 downto 0);
     write_to_flash  : out std_ulogic;
 
     --CPU-related signals.
-    in_programming_mode : buffer std_ulogic := '0'
+    in_programming_mode : buffer std_ulogic := '0';
 
     --The current value of the low-fuse register.
-    --low_fuse_in         : std_ulogic_vector(7 downto 0) := x"AA";
-    --high_fuse_in        : std_ulogic_vector(7 downto 0) := x"BB";
-    --extended_fuse_in    : std_ulogic_vector(7 downto 0) := x"CC"
+    low_fuse_in         : std_ulogic_vector(7 downto 0) := x"AA";
+    high_fuse_in        : std_ulogic_vector(7 downto 0) := x"BB";
+    extended_fuse_in    : std_ulogic_vector(7 downto 0) := x"CC"
       
   );
 end avr_flash_prog;
@@ -116,6 +112,7 @@ architecture behavioral of avr_flash_prog is
     SEND_ID, 
     SEND_VERSION_MSB, 
     SEND_VERSION_LSB,
+    SEND_PROGRAM_BYTE_LOW,
     SEND_SIGNATURE_MIDDLE,
     SEND_SIGNATURE_END,
     RECEIVE_ADDR_HIGH, 
@@ -125,8 +122,11 @@ architecture behavioral of avr_flash_prog is
     RECEIVE_PROGRAM_BYTE_LOW,
     RECEIVE_PROGRAM_BYTE_HIGH,
     PROCESS_UNIVERSAL_COMMAND,
+    WRITE_THEN_ACKNOWLEDGE,
     ACKNOWLEDGE_COMMAND, 
     TERMINATE_STRING_AND_RESTART,
+    INCREMENT_ADDRESS_AND_END,
+    INCREMENT_ADDRESS_AND_ACKNOWLEDGE,
     WAIT_FOR_TRANSMIT
   );
   signal state                : programmer_state_type := WAIT_FOR_COMMAND;
@@ -163,14 +163,9 @@ architecture behavioral of avr_flash_prog is
   constant READ_EXTENDED_FUSE_COMMAND : std_ulogic_vector(31 downto 0) := "010100000000100000000000--------";
 
   --Temporary, fixed constants 
-  constant low_fuse_in         : std_ulogic_vector(7 downto 0) := x"AA";
-  constant high_fuse_in        : std_ulogic_vector(7 downto 0) := x"BB";
-  constant extended_fuse_in    : std_ulogic_vector(7 downto 0) := x"CC";
-
-
-
-  --DEBUG ONLY
-  signal tx_signal : std_ulogic;
+  --constant low_fuse_in         : std_ulogic_vector(7 downto 0) := x"AA";
+  --constant high_fuse_in        : std_ulogic_vector(7 downto 0) := x"BB";
+  --constant extended_fuse_in    : std_ulogic_vector(7 downto 0) := x"CC";
 
 begin
 
@@ -194,14 +189,9 @@ begin
     data_stream_out     => received_data,
     data_stream_out_stb => data_waiting,
     data_stream_out_ack => data_reciept_handled,
-    tx                  => tx_signal, --tx,
+    tx                  => tx,
     rx                  => rx
   );
-
-  --DEBUG
-  tx        <= tx_signal;
-  tx_mirror <= tx_signal;
-  rx_mirror <= rx;
 
   --Create a simple signal which goes high for exactly one cycle when new data is ready.
   data_was_waiting_last_cycle <= data_waiting when rising_edge(clk);
@@ -364,6 +354,18 @@ begin
               when x"43" =>
                 state <= RECEIVE_PROGRAM_BYTE_HIGH;
 
+
+              --
+              -- 'R': Read the current program memory address.
+              when x"52"=>
+
+                --Set up transmission of the MSB of the current program memory word.
+                data_to_transmit <= data_from_flash(15 downto 8);
+                state <= WAIT_FOR_TRANSMIT;
+
+                --... followed by transmission of the LSB.
+                post_transmit_state <= SEND_PROGRAM_BYTE_LOW;
+                
 
               --
               -- 'm': Perform a page write.
@@ -613,13 +615,64 @@ begin
             --input to the program memory...
             data_to_flash(15 downto 8) <= received_data;
 
-            --... and set up a flash write.
+            --.. set up a flash write...
             write_to_flash <= '1';
+
+            state <= WRITE_THEN_ACKNOWLEDGE;
+
+          end if;
+
+
+        when WRITE_THEN_ACKNOWLEDGE =>
+
+
+            --.. set up a flash write...
+            --write_to_flash <= '1';
+
+            --... and automatically increment the address.
+            address <= std_ulogic_vector(unsigned(address) + 1);
              
             --... and acknowledge the command.
             state <= ACKNOWLEDGE_COMMAND; 
 
-          end if;
+
+
+        --
+        -- Send the LSB of the current program memory byte.
+        --
+        when SEND_PROGRAM_BYTE_LOW =>
+
+          --Schedule transmission of the LSB...
+          data_to_transmit <= data_from_flash(7 downto 0);
+          state <= WAIT_FOR_TRANSMIT;
+
+          --... followed by a wait for the next command.
+          post_transmit_state <= INCREMENT_ADDRESS_AND_END;
+
+
+
+        --
+        -- Automatically increment the target address, nd 
+        --
+        when INCREMENT_ADDRESS_AND_END =>
+
+          --Automatically increment the address.
+          address <= std_ulogic_vector(unsigned(address) + 1);
+
+          --... and wait for the next command.
+          state <= WAIT_FOR_COMMAND;
+
+
+        --
+        -- Automatically increment the target address, nd 
+        --
+        when INCREMENT_ADDRESS_AND_ACKNOWLEDGE =>
+
+          --Automatically increment the address.
+          address <= std_ulogic_vector(unsigned(address) + 1);
+
+          --... and wait for the next command.
+          state <= ACKNOWLEDGE_COMMAND;
 
 
         --

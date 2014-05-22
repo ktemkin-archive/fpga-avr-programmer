@@ -35,10 +35,10 @@ NET RX       LOC="P88";#  | IOSTANDARD=LVTTL | DRIVE=8 | SLEW=FAST;          # R
 NET TX       LOC="P90";#  | IOSTANDARD=LVTTL | DRIVE=8 | SLEW=FAST | PULLUP; # TX
 NET rx_mirror     LOC="P18"  | IOSTANDARD=LVCMOS33;                             # A0
 NET tx_mirror     LOC="P23"  | IOSTANDARD=LVCMOS33;                             # A1
-#NET A(2)     LOC="P26"  | IOSTANDARD=LVCMOS33;                             # A2
-#NET A(3)     LOC="P33"  | IOSTANDARD=LVCMOS33;                             # A3
-#NET A(4)     LOC="P35"  | IOSTANDARD=LVCMOS33;                             # A4
-#NET A(5)     LOC="P40"  | IOSTANDARD=LVCMOS33;                             # A5
+NET address_lower_nibble(0)     LOC="P26"  | IOSTANDARD=LVCMOS33;                             # A2
+NET address_lower_nibble(1)     LOC="P33"  | IOSTANDARD=LVCMOS33;                             # A3
+NET address_lower_nibble(2)     LOC="P35"  | IOSTANDARD=LVCMOS33;                             # A4
+NET address_lower_nibble(3)     LOC="P40"  | IOSTANDARD=LVCMOS33;                             # A5
 #NET A(6)     LOC="P53"  | IOSTANDARD=LVCMOS33;                             # A6
 #NET A(7)     LOC="P57"  | IOSTANDARD=LVCMOS33;                             # A7
 #NET A(8)     LOC="P60"  | IOSTANDARD=LVCMOS33;                             # A8

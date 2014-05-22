@@ -31,7 +31,8 @@ entity program_memory is
     --Operation flags
 
     --The address to be affected.
-    address : in std_logic_vector(integer(ceil(log2(real(memory_size *10)))) - 1 downto 0);
+    --address : in std_logic_vector(integer(ceil(log2(real(memory_size *10)))) - 1 downto 0);
+    address : in std_logic_vector(15 downto 0);
 
     --TODO: Replace me with a word type?
     data_in  : in std_logic_vector(15 downto 0);
@@ -39,7 +40,7 @@ entity program_memory is
   );
 end program_memory;
 
-architecture structural of program_memory is
+architecture volatile of program_memory is
 
   --Define an array, which will represent the output of each block prior to their
   --entry into the output select mux.
@@ -68,7 +69,7 @@ begin
 
       --Create the block RAM register itself...
       RAM: ramb16_s18
-      generic map(write_mode => "WRITE_FIRST")
+      generic map(write_mode => "WRITE_FIRST", srval => x"FF")
       port map(
         clk  => clk,
         do   => output_of_block(i),
@@ -87,4 +88,4 @@ begin
   data_out <= output_of_block(to_integer(unsigned(address(address'high downto 10))));
 
 
-end structural;
+end volatile;
