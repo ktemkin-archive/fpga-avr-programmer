@@ -66,14 +66,14 @@ architecture structural of flash_programmer_demo is
 begin
 
   PROGRAMMER:
-  entity avr_flash_prog
-    --generic map(
-    --  --The frequency of the Clk signal.
-    --  clock_frequency => 32000000,
+  entity avr_flash_programmer
+    generic map(
+      --The frequency of the Clk signal.
+      clock_frequency => 32000000,
 
-    --  --The baud rate to transmit at; defaults to 19200 in most programmers.
-    --  baud_rate => 19200
-    --)
+      --The baud rate to transmit at; defaults to 19200 in most programmers.
+      baud_rate => 19200
+    )
     port map(
 
       --Pass in the global control signals.

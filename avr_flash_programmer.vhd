@@ -35,7 +35,7 @@ library avr_programmer;
 use avr_programmer.constructs.all;
 
 
-entity avr_flash_prog is
+entity avr_flash_programmer is
   generic(
     
     --The clock frequency at which the device is being run.
@@ -93,10 +93,10 @@ entity avr_flash_prog is
     extended_fuse_in    : std_ulogic_vector(7 downto 0) := x"CC"
       
   );
-end avr_flash_prog;
+end avr_flash_programmer;
 
 
-architecture behavioral of avr_flash_prog is
+architecture behavioral of avr_flash_programmer is
   
   --Signals which convey transmitted and received data to/from the UART.
   signal data_to_transmit, received_data : std_ulogic_vector(7 downto 0);
@@ -122,7 +122,6 @@ architecture behavioral of avr_flash_prog is
     RECEIVE_PROGRAM_BYTE_LOW,
     RECEIVE_PROGRAM_BYTE_HIGH,
     PROCESS_UNIVERSAL_COMMAND,
-    WRITE_THEN_ACKNOWLEDGE,
     ACKNOWLEDGE_COMMAND, 
     TERMINATE_STRING_AND_RESTART,
     INCREMENT_ADDRESS_AND_END,
@@ -270,10 +269,10 @@ begin
                 state <= WAIT_FOR_TRANSMIT;
 
               --
-              -- "p": Return the programmer type. We're a serial programmer, so respond with "s" for serial.
+              -- "p": Return the programmer type. We're a serial programmer, so respond with "S" for serial.
               --
               when x"70" =>
-                data_to_transmit <= x"73";
+                data_to_transmit <= x"53";
                 state <= WAIT_FOR_TRANSMIT;
 
               --
@@ -618,22 +617,9 @@ begin
             --.. set up a flash write...
             write_to_flash <= '1';
 
-            state <= WRITE_THEN_ACKNOWLEDGE;
+            state <= INCREMENT_ADDRESS_AND_ACKNOWLEDGE;
 
           end if;
-
-
-        when WRITE_THEN_ACKNOWLEDGE =>
-
-
-            --.. set up a flash write...
-            --write_to_flash <= '1';
-
-            --... and automatically increment the address.
-            address <= std_ulogic_vector(unsigned(address) + 1);
-             
-            --... and acknowledge the command.
-            state <= ACKNOWLEDGE_COMMAND; 
 
 
 
