@@ -40,10 +40,19 @@ entity flash_programmer_demo is
     rx      : in  std_ulogic;
     tx      : out std_ulogic;
 
-    --DEBUG signals
-    rx_mirror : out std_ulogic;
-    tx_mirror : out std_ulogic;
-    address_lower_nibble : out std_ulogic_vector(3 downto 0)
+    --SPI interface (to flash memory).
+    flash_sck     : buffer std_ulogic;
+    flash_miso    : in  std_ulogic;
+    flash_mosi    : buffer std_ulogic;
+    flash_cs      : buffer std_ulogic;
+
+    --DEBUG only
+    mirror_sck      : out std_ulogic;
+    mirror_miso     : out std_ulogic;
+    mirror_mosi     : out std_ulogic;
+    mirror_cs       : out std_ulogic;
+    transact_enable : out std_ulogic;
+    busy            : out std_ulogic
 
 
   );
@@ -54,19 +63,19 @@ architecture structural of flash_programmer_demo is
     --Flash memory control I/O.
     signal erase, write_to_flash          : std_ulogic;
     signal address                        : std_ulogic_vector(15 downto 0);
-    signal data_from_flash                : std_logic_vector(15 downto 0);
+    signal data_from_flash                : std_ulogic_vector(15 downto 0);
     signal data_to_flash                  : std_ulogic_vector(15 downto 0);
 
     --CPU control signals.
     signal in_programming_mode            :  std_ulogic := '0';
 
 
-    signal tx_sig : std_ulogic;
+    signal power_on_reset                 : std_ulogic := '1';
 
 begin
 
   PROGRAMMER:
-  entity avr_flash_programmer
+  entity work.avr_flash_programmer
     generic map(
       --The frequency of the Clk signal.
       clock_frequency => 32000000,
@@ -81,7 +90,7 @@ begin
 
       --Pass the serial signals through directly. 
       rx => rx,
-      tx => tx_sig,
+      tx => tx,
 
       --Flash control signals.
       erase           => erase,
@@ -95,25 +104,54 @@ begin
     );
 
   --DEBUG
-  rx_mirror <= rx;
-  tx_mirror <= tx_sig;
-  tx <= tx_sig;
-  address_lower_nibble <= data_to_flash(3 downto 0);
+  mirror_sck  <= flash_sck;
+  mirror_miso <= flash_miso;
+  mirror_mosi <= flash_mosi;
+  mirror_cs   <= flash_cs;
+
+
+  --MEMORY:
+  --entity program_memory(volatile)
+  --  port map(
+  --    clk     => clk,
+  --    enable  => '1',
+
+  --    write   => write_to_flash,
+  --    erase   => erase,
+
+  --    --address  => std_logic_vector(address),
+  --    address  => std_logic_vector(address),
+  --    data_in  => std_logic_vector(data_to_flash),
+  --    data_out => data_from_flash
+  --  );
 
   MEMORY:
-  entity program_memory(volatile)
-    port map(
-      clk     => clk,
-      enable  => '1',
+  entity work.spi_program_memory
+  port map(
 
-      write   => write_to_flash,
-      erase   => erase,
+    --Global signals.
+    clk     => clk,
+    enable  => '1',
+    reset   => '0',
 
-      --address  => std_logic_vector(address),
-      address  => std_logic_vector(address),
-      data_in  => std_logic_vector(data_to_flash),
-      data_out => data_from_flash
-    );
+    --SPI signals
+    flash_sck     => flash_sck,
+    flash_miso    => flash_miso,
+    flash_mosi    => flash_mosi,
+    flash_cs      => flash_cs,
+
+    write   => write_to_flash,
+    erase   => erase,
+
+    address  => address,
+    data_in  => data_to_flash,
+    data_out => data_from_flash,
+
+    transact_enable => transact_enable,
+    busy => busy
+
+
+  );
 
 
 end structural;

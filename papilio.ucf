@@ -30,17 +30,15 @@ CONFIG PROHIBIT=P49;
 CONFIG PROHIBIT=P48;
 CONFIG PROHIBIT=P47;
 
-NET CLK      LOC="P89";#  | IOSTANDARD=LVCMOS25 | PERIOD=31.25ns;            # CLK
-NET RX       LOC="P88";#  | IOSTANDARD=LVTTL | DRIVE=8 | SLEW=FAST;          # RX
-NET TX       LOC="P90";#  | IOSTANDARD=LVTTL | DRIVE=8 | SLEW=FAST | PULLUP; # TX
-NET rx_mirror     LOC="P18"  | IOSTANDARD=LVCMOS33;                             # A0
-NET tx_mirror     LOC="P23"  | IOSTANDARD=LVCMOS33;                             # A1
-NET address_lower_nibble(0)     LOC="P26"  | IOSTANDARD=LVCMOS33;                             # A2
-NET address_lower_nibble(1)     LOC="P33"  | IOSTANDARD=LVCMOS33;                             # A3
-NET address_lower_nibble(2)     LOC="P35"  | IOSTANDARD=LVCMOS33;                             # A4
-NET address_lower_nibble(3)     LOC="P40"  | IOSTANDARD=LVCMOS33;                             # A5
-#NET A(6)     LOC="P53"  | IOSTANDARD=LVCMOS33;                             # A6
-#NET A(7)     LOC="P57"  | IOSTANDARD=LVCMOS33;                             # A7
+NET CLK      LOC="P89"  | IOSTANDARD=LVCMOS25 | PERIOD=31.25ns;            # CLK
+NET RX       LOC="P88"  | IOSTANDARD=LVTTL | DRIVE=8 | SLEW=FAST;          # RX
+NET TX       LOC="P90"  | IOSTANDARD=LVTTL | DRIVE=8 | SLEW=FAST; # TX
+NET mirror_sck          LOC="P18"  | IOSTANDARD=LVCMOS33;                             # A0
+NET mirror_miso         LOC="P23"  | IOSTANDARD=LVCMOS33;                             # A1
+NET mirror_mosi         LOC="P26"  | IOSTANDARD=LVCMOS33;                             # A2
+NET mirror_cs           LOC="P33"  | IOSTANDARD=LVCMOS33;                             # A3
+NET transact_enable     LOC="P53"  | IOSTANDARD=LVCMOS33;                             # A6
+NET busy                LOC="P57"  | IOSTANDARD=LVCMOS33;                             # A7
 #NET A(8)     LOC="P60"  | IOSTANDARD=LVCMOS33;                             # A8
 #NET A(9)     LOC="P62"  | IOSTANDARD=LVCMOS33;                             # A9
 #NET A(10)    LOC="P65"  | IOSTANDARD=LVCMOS33;                             # A10
@@ -85,7 +83,7 @@ NET address_lower_nibble(3)     LOC="P40"  | IOSTANDARD=LVCMOS33;               
 #NET JTAG_TCK LOC="P77"  | IOSTANDARD=LVTTL | DRIVE=8 | SLEW=FAST;          # JTAG_TCK
 #NET JTAG_TDI LOC="P100" | IOSTANDARD=LVTTL | DRIVE=8 | SLEW=FAST;          # JTAG_TDI
 #NET JTAG_TDO LOC="P76"  | IOSTANDARD=LVTTL | DRIVE=8 | SLEW=FAST;          # JTAG_TDO
-#NET FLASH_CS LOC="P24"  | IOSTANDARD=LVTTL | DRIVE=8 | SLEW=FAST;          # FLASH_CS
-#NET FLASH_CK LOC="P50"  | IOSTANDARD=LVTTL | DRIVE=8 | SLEW=FAST;          # FLASH_CK
-#NET FLASH_SI LOC="P27"  | IOSTANDARD=LVTTL | DRIVE=8 | SLEW=FAST;          # FLASH_SI
-#NET FLASH_SO LOC="P44"  | IOSTANDARD=LVTTL | DRIVE=8 | SLEW=FAST | PULLUP; # FLASH_SO
+NET FLASH_CS   LOC="P24"  | IOSTANDARD=LVCMOS33 | SLEW=FAST;          # FLASH_CS
+NET FLASH_SCK  LOC="P50"  | IOSTANDARD=LVCMOS33 | SLEW=FAST;          # FLASH_CK
+NET FLASH_MOSI LOC="P27"  | IOSTANDARD=LVCMOS33 | SLEW=FAST;          # FLASH_SI
+NET FLASH_MISO LOC="P44"  | IOSTANDARD=LVCMOS33 | SLEW=FAST | PULLUP; # FLASH_SO

@@ -1,8 +1,9 @@
 --************************************************************************************************
 -- 8Kx16(8 KB) PM RAM for AVR Core(Xilinx)
--- Version 0.1
--- Designed by Ruslan Lepetenok 
--- Modified by Jack Gassett for use with Papilio
+-- Version 0.2
+-- 
+-- 
+-- Based on an original design by Ruslan Lepetenok and Jack Gassett
 -- Modified 11.06.2009
 --************************************************************************************************
 
@@ -32,11 +33,11 @@ entity program_memory is
 
     --The address to be affected.
     --address : in std_logic_vector(integer(ceil(log2(real(memory_size *10)))) - 1 downto 0);
-    address : in std_logic_vector(15 downto 0);
+    address : in std_ulogic_vector(15 downto 0);
 
     --TODO: Replace me with a word type?
-    data_in  : in std_logic_vector(15 downto 0);
-    data_out : out std_logic_vector(15 downto 0)
+    data_in  : in std_ulogic_vector(15 downto 0);
+    data_out : out std_ulogic_vector(15 downto 0)
   );
 end program_memory;
 
@@ -48,7 +49,7 @@ architecture volatile of program_memory is
   signal output_of_block : block_ram_outputs;
 
   --Intermediary signals: these handle 
-  signal write_enable_for     : std_logic_vector(memory_size - 1 downto 0);
+  signal write_enable_for     : std_ulogic_vector(memory_size - 1 downto 0);
   signal block_is_selected    : std_logic_vector(memory_size - 1 downto 0);
 
 
@@ -73,8 +74,8 @@ begin
       port map(
         clk  => clk,
         do   => output_of_block(i),
-        di   => data_in,
-        addr => address(9 downto 0),
+        di   => std_logic_vector(data_in),
+        addr => std_logic_vector(address(9 downto 0)),
         dip  => "11",
         en   => enable,
         ssr  => erase,
@@ -85,7 +86,7 @@ begin
   end generate;
 
   --Select the output for the appropriate block.
-  data_out <= output_of_block(to_integer(unsigned(address(address'high downto 10))));
+  data_out <= std_ulogic_vector(output_of_block(to_integer(unsigned(address(address'high downto 10)))));
 
 
 end volatile;
