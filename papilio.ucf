@@ -33,12 +33,12 @@ CONFIG PROHIBIT=P47;
 NET CLK      LOC="P89"  | IOSTANDARD=LVCMOS25 | PERIOD=31.25ns;            # CLK
 NET RX       LOC="P88"  | IOSTANDARD=LVTTL | DRIVE=8 | SLEW=FAST;          # RX
 NET TX       LOC="P90"  | IOSTANDARD=LVTTL | DRIVE=8 | SLEW=FAST; # TX
-NET mirror_sck          LOC="P18"  | IOSTANDARD=LVCMOS33;                             # A0
-NET mirror_miso         LOC="P23"  | IOSTANDARD=LVCMOS33;                             # A1
-NET mirror_mosi         LOC="P26"  | IOSTANDARD=LVCMOS33;                             # A2
-NET mirror_cs           LOC="P33"  | IOSTANDARD=LVCMOS33;                             # A3
-NET transact_enable     LOC="P53"  | IOSTANDARD=LVCMOS33;                             # A6
-NET busy                LOC="P57"  | IOSTANDARD=LVCMOS33;                             # A7
+#NET mirror_sck          LOC="P18"  | IOSTANDARD=LVCMOS33;                             # A0
+#NET mirror_miso         LOC="P23"  | IOSTANDARD=LVCMOS33;                             # A1
+#NET mirror_mosi         LOC="P26"  | IOSTANDARD=LVCMOS33;                             # A2
+#NET mirror_cs           LOC="P33"  | IOSTANDARD=LVCMOS33;                             # A3
+#NET transact_enable     LOC="P53"  | IOSTANDARD=LVCMOS33;                             # A6
+#NET busy                LOC="P57"  | IOSTANDARD=LVCMOS33;                             # A7
 #NET A(8)     LOC="P60"  | IOSTANDARD=LVCMOS33;                             # A8
 #NET A(9)     LOC="P62"  | IOSTANDARD=LVCMOS33;                             # A9
 #NET A(10)    LOC="P65"  | IOSTANDARD=LVCMOS33;                             # A10
@@ -63,10 +63,10 @@ NET busy                LOC="P57"  | IOSTANDARD=LVCMOS33;                       
 #NET B(13)    LOC="P32"  | IOSTANDARD=LVCMOS33;                             # B13
 #NET B(14)    LOC="P25"  | IOSTANDARD=LVCMOS33;                             # B14
 #NET B(15)    LOC="P22"  | IOSTANDARD=LVCMOS33;                             # B15
-#NET C(0)     LOC="P91"  | IOSTANDARD=LVCMOS33;                             # C0
-#NET C(1)     LOC="P92"  | IOSTANDARD=LVCMOS33;                             # C1
-#NET C(2)     LOC="P94"  | IOSTANDARD=LVCMOS33;                             # C2
-#NET C(3)     LOC="P95"  | IOSTANDARD=LVCMOS33;                             # C3
+NET mirror_sck    LOC="P91"  | IOSTANDARD=LVCMOS33;                             # C0
+NET mirror_mosi   LOC="P92"  | IOSTANDARD=LVCMOS33;                             # C1
+NET mirror_miso   LOC="P94"  | IOSTANDARD=LVCMOS33;                             # C2
+NET mirror_cs     LOC="P95"  | IOSTANDARD=LVCMOS33;                             # C3
 #NET C(4)     LOC="P98"  | IOSTANDARD=LVCMOS33;                             # C4
 #NET C(5)     LOC="P2"   | IOSTANDARD=LVCMOS33;                             # C5
 #NET C(6)     LOC="P3"   | IOSTANDARD=LVCMOS33;                             # C6

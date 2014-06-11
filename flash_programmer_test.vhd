@@ -140,12 +140,12 @@ begin
     flash_mosi    => flash_mosi,
     flash_cs      => flash_cs,
 
-    write   => write_to_flash,
-    erase   => erase,
+    write         => write_to_flash,
+    erase         => erase,
 
-    address  => address,
-    data_in  => data_to_flash,
-    data_out => data_from_flash,
+    address       => address,
+    data_in       => data_to_flash,
+    data_out      => data_from_flash,
 
     transact_enable => transact_enable,
     busy => busy

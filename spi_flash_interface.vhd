@@ -115,13 +115,14 @@ architecture spi_flash_buffered of spi_program_memory is
       BOOTSTRAP_WAIT_DUMMY_CYCLE,
       BOOTSTRAP_POPULATE_MEMORY_HIGH_BYTE,
       BOOTSTRAP_POPULATE_MEMORY_LOW_BYTE,
+      BOOTSTRAP_INCREMENT_ADDRESS,
       IDLE
     );
   signal state : state_type := STARTUP;
 
 begin
 
-  -- TODO: Hook this up correctly?
+  -- TODO: Hook this up correctly once write operations are supported.
   data_out <= data_from_local_memory;
 
   --
@@ -340,6 +341,7 @@ begin
 
               --Once the dummy instruction has been accepted,
               --move on to our second wait state.
+              --if spi_data_accepted = '1' then
               if spi_data_accepted = '1' then
                 state <= BOOTSTRAP_WAIT_DUMMY_CYCLE;
               end if;
@@ -358,6 +360,8 @@ begin
               end if;
 
 
+
+
             --
             -- Read the low byte of a pair.
             --
@@ -374,7 +378,7 @@ begin
               if spi_data_complete = '1' then
 
                 --Place the data on the input of the local memory...
-                data_to_local_memory(15 downto 8) <= received_data;
+                data_to_local_memory(7 downto 0) <= received_data;
 
                 --... and continue to populate the memory's high byte.
                 state <= BOOTSTRAP_POPULATE_MEMORY_HIGH_BYTE;
@@ -398,8 +402,8 @@ begin
 
                 --Place the data on the input of the local memory, 
                 --and queue a local memory write.
-                data_to_local_memory(7 downto 0) <= received_data;
-                write_to_local_memory            <= '1';
+                data_to_local_memory(15 downto 8) <= received_data;
+                write_to_local_memory             <= '1';
 
 
                 --If we're about to exceed the size of the memory, complete the boostrap
@@ -409,15 +413,19 @@ begin
 
                 --Otherwise, continue bootstrapping.
                 else
-
-                  --... and increment the address we're working with.
-                  bootstrap_memory_address <= bootstrap_memory_address + 1;
-
-                  state <= BOOTSTRAP_POPULATE_MEMORY_LOW_BYTE;
+                  state <= BOOTSTRAP_INCREMENT_ADDRESS;
                 end if;
 
               end if;
 
+            
+            --
+            -- After we've populated a given address in local memory,
+            -- move on to he next address, and continue bootstrapping.
+            --
+            when BOOTSTRAP_INCREMENT_ADDRESS =>
+              bootstrap_memory_address <= bootstrap_memory_address + 1;
+              state <= BOOTSTRAP_POPULATE_MEMORY_LOW_BYTE;
 
             --
             -- Idle state; waits for further instruction.
