@@ -62,7 +62,6 @@ entity spi_program_memory is
     erase    : in std_ulogic;
 
     --The address to be affected.
-    --address : in std_logic_vector(integer(ceil(log2(real(memory_size *10)))) - 1 downto 0);
     address : in std_ulogic_vector(15 downto 0);
 
     --TODO: Replace me with a word type?
@@ -83,21 +82,52 @@ end spi_program_memory;
 architecture spi_flash_buffered of spi_program_memory is
   
   --Signals that interconnect our SPI controller to our internal hardware.
-  signal data_to_transmit, received_data : std_ulogic_vector(7 downto 0);
+  signal received_data : std_ulogic_vector(7 downto 0);
 
   --SPI control and status flags.
   signal spi_is_busy, spi_was_busy, spi_data_accepted, spi_data_complete : std_ulogic;
   signal initiate_transaction, continue_transaction : std_ulogic := '0';
 
+  --
+  --SPI command "queue".
+  --
+  type byte_queue is array(natural range <>) of std_ulogic_vector(7 downto 0);
+
+  --Stores a queue of bytes to be transmitted, in a shift-out configuration.
+  --The least significant position in the queue represents the next byte to be transmitted.
+  signal spi_data_to_queue, spi_transmit_queue : byte_queue(0 to 4);
+
+  --Represents the number of bytes remaining in the currently queued transmission.
+  --Note that this need not be positive for a transmission to continue.
+  signal spi_bytes_to_queue, spi_bytes_remaining : integer range 0 to spi_transmit_queue'high + 1;
+
+  --Request that our SPI controller enqueue new data.
+  signal spi_request_enqueue : std_ulogic;
+
+  --Request that our contorller enqueue a new set of data.
+  signal spi_queue_complete : std_ulogic;
+
+  --Indicates that a queued transmit has completed; only valid once per queued transmit.
+  --Once a queued transmit is complete, this signal will go high once per recieved byte.
+  signal spi_queued_transmit_complete : std_ulogic;
+
+  --
   --SPI command constants.
-  signal COMMAND_FAST_READ : std_ulogic_vector(7 downto 0) := x"0B";
+  --
+  constant COMMAND_FAST_READ : std_ulogic_vector(7 downto 0) := x"0B";
+
+  --The full command to schedule a fast read from the relevant starting address in the SPI flash.
+  constant COMMAND_READ_FROM_START : byte_queue := (COMMAND_FAST_READ, start_address(23 downto 16), start_address(15 downto 8), start_address(7 downto 0), x"00");
 
   --Local memory data exchange signals.
   signal local_memory_address     : std_ulogic_vector(15 downto 0) := (others => '0');
-  signal bootstrap_memory_address : unsigned(15 downto 0)          := (others => '0');
-
   signal data_to_local_memory, data_from_local_memory : std_ulogic_vector(15 downto 0);
   signal write_to_local_memory, clear_local_memory, bootstrap_in_progress : std_ulogic;
+
+  --Bootstrap copies of the local memory data exchange signals.
+  signal bootstrap_memory_address : unsigned(15 downto 0)          := (others => '0');
+  signal bootstrap_data_to_local_memory, bootstrap_data_from_local_memory : std_ulogic_vector(15 downto 0);
+  signal bootstrap_write_to_local_memory : std_ulogic;
 
   --"Wait time" counter.
   signal cycles_waited : unsigned(11 downto 0);
@@ -107,15 +137,13 @@ architecture spi_flash_buffered of spi_program_memory is
     (
       STARTUP,
       WAIT_FOR_INITIALIZATION,
+
       START_BOOTSTRAP_READ,
-      BOOTSTRAP_SEND_ADDRESS_MSB,
-      BOOTSTRAP_SEND_ADDRESS_MIDDLE,
-      BOOTSTRAP_SEND_ADDRESS_LSB,
-      BOOTSTRAP_QUEUE_DUMMY_CYCLE,
-      BOOTSTRAP_WAIT_DUMMY_CYCLE,
+      BOOTSTRAP_SEND_READ_COMMAND,
       BOOTSTRAP_POPULATE_MEMORY_HIGH_BYTE,
       BOOTSTRAP_POPULATE_MEMORY_LOW_BYTE,
       BOOTSTRAP_INCREMENT_ADDRESS,
+
       IDLE
     );
   signal state : state_type := STARTUP;
@@ -136,28 +164,46 @@ begin
       enable   => '1',
 
       write    => write_to_local_memory,
-      erase    => clear_local_memory,
+      --erase    => clear_local_memory,
+      erase    => erase,
 
       address  => local_memory_address,
       data_in  => data_to_local_memory,
       data_out => data_from_local_memory
     );
 
-  --
-  -- Address control for the local memory.
-  --
-  local_memory_address <=
-    std_ulogic_vector(bootstrap_memory_address) when bootstrap_in_progress = '1' else
-    address;
 
-  
+  --
+  -- Multi-channel multiplexer which selects the local memory inputs
+  -- according to the current operating mode.
+  --
+  process(bootstrap_in_progress)
+  begin
+
+    --If we're in the boostrap mode, allow the bootstrap controller
+    --to control the local memory.
+    if bootstrap_in_progress = '1' then
+      local_memory_address    <= std_ulogic_vector(bootstrap_memory_address);
+      write_to_local_memory   <= bootstrap_write_to_local_memory;
+      data_to_local_memory    <= bootstrap_data_to_local_memory;
+
+    --Otherwise, allow the local memory to be accessed using the
+    --external controls.
+    else
+      local_memory_address    <= address;
+      write_to_local_memory   <= write;
+      data_to_local_memory    <= data_in;
+    end if;
+
+  end process;
+
+
   --
   -- The main SPI controller for the given SPI flash.
   --
   SPI_CONTROLLER:
   entity work.spi_master 
     generic map(
-
       --Set the number of parallel devices connected to this SPI bus.
       slaves  => 1,
 
@@ -188,7 +234,7 @@ begin
       cpha    => '0',
 
       --Parallel data in and out of the SPI master.
-      tx_data => data_to_transmit,
+      tx_data => spi_transmit_queue(0),
       rx_data => received_data,
 
       --Status flags.
@@ -211,10 +257,45 @@ begin
     bootstrap_complete <= not bootstrap_in_progress;
 
     --
+    -- Simple queueing transmitter: allows sequences of bytes to be transmitted via SPI.
+    -- 
+    QUEUEING_TRANSMITTER:
+    process(clk)
+    begin
+      if rising_edge(clk) then
+
+        --If the main state machine is requesting that we enqueue
+        --a new set of data, do so.
+        if spi_request_enqueue = '1' then
+          spi_transmit_queue  <= spi_data_to_queue;
+          spi_bytes_remaining <= spi_bytes_to_queue;
+
+        --Otherwise, if the SPI transmtter subsystem has accepted our data...
+        elsif spi_data_accepted = '1' then
+
+          --...move on to transmitting the next byte...
+          spi_transmit_queue <= spi_transmit_queue(1 to spi_transmit_queue'high) & x"00";
+
+          --... and decrease the number of bytes to be transmitted 
+          if spi_bytes_remaining > 0 then
+            spi_bytes_remaining <= spi_bytes_remaining - 1;
+          else
+             
+          end if;
+
+        end if;
+
+      end if;
+    end process;
+
+    --Signal which indicates when a queued transmission has completed. See the disclaimer at the signal's definition.
+    spi_queued_transmit_complete <= '1' when spi_bytes_remaining = 0 and spi_data_complete = '1' else '0';
+
+    --
     -- Main controller FSM for the whole device.
     --
     CONTROLLER:
-    process(clk, cycles_waited)
+    process(clk)
     begin
       if rising_edge(clk) then
 
@@ -223,10 +304,11 @@ begin
         else
 
           --Keep the following signals low unless explicitly assertd.
-          initiate_transaction  <= '0';
-          continue_transaction  <= '0';
-          write_to_local_memory <= '0';
-          clear_local_memory    <= '0';
+          initiate_transaction            <= '0';
+          continue_transaction            <= '0';
+          bootstrap_write_to_local_memory <= '0';
+          clear_local_memory              <= '0';
+          spi_request_enqueue             <= '0';
 
           case state is
 
@@ -243,6 +325,7 @@ begin
               cycles_waited <= (others => '0');
 
               state <= WAIT_FOR_INITIALIZATION;
+
 
             --
             -- Wait for the SPI flash to start up; this allows our SPI lines to be set to the proper
@@ -262,12 +345,10 @@ begin
                 state <= WAIT_FOR_INITIALIZATION;
               end if;
 
+
             --
-            -- Initial "bootstrap" state.
-            --
-            -- In this state, the memory will attempt to bootstrap its fast local SRAM
-            -- from the SPI flash, with the intent of providing a quickly-accessible mirror 
-            -- of the AVR program in flash.
+            -- Begin the process of bootstrapping the device
+            -- by queueing transmisison of the SPI read command.
             --
             when START_BOOTSTRAP_READ =>
 
@@ -278,88 +359,36 @@ begin
               bootstrap_memory_address <= (others => '0');
 
               --Start an SPI transaction, and send the "fast read" command.
-              data_to_transmit      <= COMMAND_FAST_READ;
-              initiate_transaction  <= '1';
+              --initiate_transaction  <= '1';
               continue_transaction  <= '1';
 
-              --Once the SPI controller has accepted the byte, move to the SEND_BOOTSTRAP_ADDRESS
-              --state.
-              if spi_data_accepted = '1' then
-                state <= BOOTSTRAP_SEND_ADDRESS_MSB;
-              end if;
+              --Request transmission of an SPI fast read from the device.
+              spi_request_enqueue <= '1';
+              spi_bytes_to_queue  <= COMMAND_READ_FROM_START'length;
+              spi_data_to_queue   <= COMMAND_READ_FROM_START;
+
+              --... and then wait for the read to complete.
+              state <= BOOTSTRAP_SEND_READ_COMMAND;
 
 
             --
-            -- Send the most significant bit of the address at which the AVR program is located.
+            -- Once an SPI read command has been enqueued,
+            -- wait for the command's execution to complete.
             --
-            when BOOTSTRAP_SEND_ADDRESS_MSB =>
-
-              --Continue to transmit the MSB of the start address...
-              continue_transaction <= '1';
-              data_to_transmit     <= start_address(23 downto 16);
-
-              
-              if spi_data_accepted = '1' then
-                state <= BOOTSTRAP_SEND_ADDRESS_MIDDLE;
-              end if;
-
-
-            --
-            -- Send the most significant bit of the address at which the AVR program is located.
-            --
-            when BOOTSTRAP_SEND_ADDRESS_MIDDLE =>
-
-              data_to_transmit <= start_address(15 downto 8);
+            when BOOTSTRAP_SEND_READ_COMMAND =>
+  
+              --Mark this as a continued transaction: we'll continue 
               continue_transaction <= '1';
 
-              if spi_data_accepted = '1' then
-                state <= BOOTSTRAP_SEND_ADDRESS_LSB;
-              end if;
+              --If this is the first byte in the transmission, ensure that
+              --we're attempting to initate a transmission.
+              if spi_bytes_remaining = COMMAND_READ_FROM_START'length then
+                initiate_transaction <= '1';
 
-
-            --
-            -- Send the most significant bit of the address at which the AVR program is located.
-            --
-            when BOOTSTRAP_SEND_ADDRESS_LSB =>
-
-              data_to_transmit     <= start_address(7 downto 0);
-              continue_transaction <= '1';
-
-              --Once the LSB address has been accepted,
-              --prepare for the read.
-              if spi_data_accepted = '1' then
-                state <= BOOTSTRAP_QUEUE_DUMMY_CYCLE;
-              end if;
-
-
-            --
-            -- Waits a single SPI write cycle, giving the SPI flash time to prepare for a fast write.
-            --
-            when BOOTSTRAP_QUEUE_DUMMY_CYCLE =>
-
-              continue_transaction <= '1';
-
-              --Once the dummy instruction has been accepted,
-              --move on to our second wait state.
-              --if spi_data_accepted = '1' then
-              if spi_data_accepted = '1' then
-                state <= BOOTSTRAP_WAIT_DUMMY_CYCLE;
-              end if;
-
-
-            --
-            -- Waits until the dummy cycle is complete.
-            --
-            when BOOTSTRAP_WAIT_DUMMY_CYCLE =>
-
-              continue_transaction <= '1';
-
-              --Wait for the SPI dummy instruction to be complete.
-              if spi_data_complete = '1' then
+              --Or, if we've just finished a transmission, continue bootstrapping.
+              elsif spi_queued_transmit_complete = '1' then
                 state <= BOOTSTRAP_POPULATE_MEMORY_LOW_BYTE;
               end if;
-
-
 
 
             --
@@ -378,7 +407,7 @@ begin
               if spi_data_complete = '1' then
 
                 --Place the data on the input of the local memory...
-                data_to_local_memory(7 downto 0) <= received_data;
+                bootstrap_data_to_local_memory(7 downto 0) <= received_data;
 
                 --... and continue to populate the memory's high byte.
                 state <= BOOTSTRAP_POPULATE_MEMORY_HIGH_BYTE;
@@ -402,8 +431,8 @@ begin
 
                 --Place the data on the input of the local memory, 
                 --and queue a local memory write.
-                data_to_local_memory(15 downto 8) <= received_data;
-                write_to_local_memory             <= '1';
+                bootstrap_data_to_local_memory(15 downto 8) <= received_data;
+                bootstrap_write_to_local_memory  <= '1';
 
 
                 --If we're about to exceed the size of the memory, complete the boostrap
@@ -433,7 +462,6 @@ begin
             when IDLE =>
 
               bootstrap_in_progress <= '0';
-
               null;
 
 
@@ -444,10 +472,6 @@ begin
         end if;
       end if;
     end process;
-      
-
-
-
 
 end spi_flash_buffered;
 
