@@ -67,8 +67,8 @@ NET mirror_sck    LOC="P91"  | IOSTANDARD=LVCMOS33;                             
 NET mirror_mosi   LOC="P92"  | IOSTANDARD=LVCMOS33;                             # C1
 NET mirror_miso   LOC="P94"  | IOSTANDARD=LVCMOS33;                             # C2
 NET mirror_cs     LOC="P95"  | IOSTANDARD=LVCMOS33;                             # C3
-#NET C(4)     LOC="P98"  | IOSTANDARD=LVCMOS33;                             # C4
-#NET C(5)     LOC="P2"   | IOSTANDARD=LVCMOS33;                             # C5
+NET transact_enable     LOC="P98"  | IOSTANDARD=LVCMOS33;                             # C4
+NET busy     LOC="P2"   | IOSTANDARD=LVCMOS33;                             # C5
 #NET C(6)     LOC="P3"   | IOSTANDARD=LVCMOS33;                             # C6
 #NET C(7)     LOC="P4"   | IOSTANDARD=LVCMOS33;                             # C7
 #NET C(8)     LOC="P5"   | IOSTANDARD=LVCMOS33;                             # C8

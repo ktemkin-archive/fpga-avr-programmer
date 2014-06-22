@@ -30,7 +30,6 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
---TODO: move this to the relevant library!
 library avr_programmer;
 use avr_programmer.constructs.all;
 

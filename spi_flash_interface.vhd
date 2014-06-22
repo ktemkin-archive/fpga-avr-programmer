@@ -1,6 +1,6 @@
 --  
 -- AVR-910 Compliant In-System Programmer for Soft-IP AVR-compatible microcontrollers.
--- Simple demonstration fixture.
+-- SPI flash layer for working with external flash memories.
 --
 -- The MIT License (MIT)
 -- 
@@ -30,10 +30,15 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+library avr_programmer;
+use avr_programmer.constructs.all;
+
 entity spi_program_memory is 
   generic(
     
     --The address in the SPI flash at which AVR programs are stored.
+    --For the built-in erase functionality to work, this should be a
+    --multiple of 4KiB (0x1000).
     start_address : in std_ulogic_vector(23 downto 0) := x"050000"; 
 
     --The number of clock cycles to delay before starting an SPI
@@ -41,6 +46,9 @@ entity spi_program_memory is
     startup_delay : in integer := 4095;
 
     --The size of the given memory, in kilobytes.
+    --
+    --To be compatible with industry-standard flash memory
+    --erase scheme this should be a multiple of four.
     memory_size   : in integer := 8
 
   );
@@ -79,74 +87,81 @@ entity spi_program_memory is
 end spi_program_memory;
 
 
+
 architecture spi_flash_buffered of spi_program_memory is
-  
-  --Signals that interconnect our SPI controller to our internal hardware.
-  signal received_data : std_ulogic_vector(7 downto 0);
 
-  --SPI control and status flags.
-  signal spi_is_busy, spi_was_busy, spi_data_accepted, spi_data_complete : std_ulogic;
-  signal initiate_transaction, continue_transaction : std_ulogic := '0';
-
-  --
-  --SPI command "queue".
-  --
-  type byte_queue is array(natural range <>) of std_ulogic_vector(7 downto 0);
-
-  --Stores a queue of bytes to be transmitted, in a shift-out configuration.
-  --The least significant position in the queue represents the next byte to be transmitted.
-  signal spi_data_to_queue, spi_transmit_queue : byte_queue(0 to 4);
-
-  --Represents the number of bytes remaining in the currently queued transmission.
-  --Note that this need not be positive for a transmission to continue.
-  signal spi_bytes_to_queue, spi_bytes_remaining : integer range 0 to spi_transmit_queue'high + 1;
-
-  --Request that our SPI controller enqueue new data.
-  signal spi_request_enqueue : std_ulogic;
-
-  --Request that our contorller enqueue a new set of data.
-  signal spi_queue_complete : std_ulogic;
-
-  --Indicates that a queued transmit has completed; only valid once per queued transmit.
-  --Once a queued transmit is complete, this signal will go high once per recieved byte.
-  signal spi_queued_transmit_complete : std_ulogic;
+  constant KILOBYTES_PER_PAGE : integer := 4;
 
   --
   --SPI command constants.
   --
-  constant COMMAND_FAST_READ : std_ulogic_vector(7 downto 0) := x"0B";
+  constant COMMAND_FAST_READ                         : byte := x"0B";
+  constant COMMAND_ENABLE_WRITE_TO_STATUS_REGISTER   : byte := x"50";
+  constant COMMAND_WRITE_TO_STATUS_REGISTER          : byte := x"01";
+  constant COMMAND_WRITE_ENABLE                      : byte := x"06";
+  constant COMMAND_ERASE_FOUR_KILOBYTES              : byte := x"20";
 
   --The full command to schedule a fast read from the relevant starting address in the SPI flash.
-  constant COMMAND_READ_FROM_START : byte_queue := (COMMAND_FAST_READ, start_address(23 downto 16), start_address(15 downto 8), start_address(7 downto 0), x"00");
+  constant COMMAND_READ_FROM_START          : byte_vector := (COMMAND_FAST_READ, start_address(23 downto 16), start_address(15 downto 8), start_address(7 downto 0), x"00");
+  constant COMMAND_DISABLE_WRITE_PROTECTION : byte_vector := (COMMAND_WRITE_TO_STATUS_REGISTER, x"00");
+  constant COMMAND_PREFIX_ERASE_PAGE        : byte_vector := (0 => COMMAND_ERASE_FOUR_KILOBYTES);
+
+  --Timing constants for SPI writes.
+  constant CYCLES_FOR_FOUR_KILOBYTE_ERASE   : integer     := 80000;
+
+  --Local memory constants.
+  constant HIGHEST_LOCAL_MEMORY_ADDRESS : integer := (memory_size * 1024 - 1);
+
 
   --Local memory data exchange signals.
-  signal local_memory_address     : std_ulogic_vector(15 downto 0) := (others => '0');
+  signal local_memory_address : std_ulogic_vector(15 downto 0) := (others => '0');
   signal data_to_local_memory, data_from_local_memory : std_ulogic_vector(15 downto 0);
   signal write_to_local_memory, clear_local_memory, bootstrap_in_progress : std_ulogic;
 
   --Bootstrap copies of the local memory data exchange signals.
-  signal bootstrap_memory_address : unsigned(15 downto 0)          := (others => '0');
+  signal bootstrap_memory_address : unsigned(15 downto 0) := (others => '0');
   signal bootstrap_data_to_local_memory, bootstrap_data_from_local_memory : std_ulogic_vector(15 downto 0);
   signal bootstrap_write_to_local_memory : std_ulogic;
 
+  --Signals for the "chip erase" mode.
+  constant memory_size_in_pages : integer := memory_size / KILOBYTES_PER_PAGE;
+  signal   pages_to_erase       : integer range 0 to memory_size_in_pages;
+
   --"Wait time" counter.
-  signal cycles_waited : unsigned(11 downto 0);
+  signal cycles_waited : unsigned(19 downto 0);
 
   --Signals for the core FSM.
   type state_type is 
     (
+      --Device startup states.
       STARTUP,
       WAIT_FOR_INITIALIZATION,
 
+      --Initial bootstrap states.
       START_BOOTSTRAP_READ,
       BOOTSTRAP_SEND_READ_COMMAND,
       BOOTSTRAP_POPULATE_MEMORY_HIGH_BYTE,
       BOOTSTRAP_POPULATE_MEMORY_LOW_BYTE,
       BOOTSTRAP_INCREMENT_ADDRESS,
 
+      --Erase memory states.
+      CHIP_ERASE_DISABLE_WRITE_PROTECT,
+      CHIP_ERASE_WRITE_ENABLE,
+      CHIP_ERASE_ERASE_PAGE,
+      CHIP_ERASE_WAIT_FOR_ERASE, 
+
       IDLE
     );
   signal state : state_type := STARTUP;
+
+
+  signal spi_ready_for_continuation, spi_data_complete, spi_transmit_complete : std_ulogic;
+  signal spi_enqueuing_starts_transmission, spi_request_enqueue, spi_receive : std_ulogic;
+  signal spi_last_received_byte : byte;
+  signal spi_data_to_transmit : byte_vector(0 to 4);
+  signal spi_transmission_length : integer range 0 to spi_data_to_transmit'high;
+  signal spi_ready_for_new_transmission : std_ulogic;
+
 
 begin
 
@@ -170,6 +185,40 @@ begin
       address  => local_memory_address,
       data_in  => data_to_local_memory,
       data_out => data_from_local_memory
+    );
+
+  --
+  -- Core transmitter.
+  --
+  QUEUEING_TRANSMITTER:
+  entity work.spi_queueing_master
+    port map(
+
+      clk                => clk,
+      reset              => reset,
+
+      --Transmitter data inputs.
+      data_to_queue      => spi_data_to_transmit,
+      data_length        => spi_transmission_length,
+      request_enqueue    => spi_request_enqueue,
+
+      --Transmitter data outputs.
+      receive            => spi_receive,
+      last_received_byte => spi_last_received_byte,
+      new_byte_received  => spi_data_complete,
+
+      --start_transmission => spi_enqueuing_starts_transmission,
+      
+      --SPI bus signals.
+      flash_sck          => flash_sck,
+      flash_miso         => flash_miso,
+      flash_mosi         => flash_mosi,
+      flash_cs           => flash_cs,
+
+      --SPI progress signals.
+      ready_for_continuous_enqueue  => spi_ready_for_continuation,
+      ready_for_new_packet_enqueue  => spi_ready_for_new_transmission,
+      transmit_complete             => spi_transmit_complete
     );
 
 
@@ -197,118 +246,72 @@ begin
 
   end process;
 
-
-  --
-  -- The main SPI controller for the given SPI flash.
-  --
-  SPI_CONTROLLER:
-  entity work.spi_master 
-    generic map(
-      --Set the number of parallel devices connected to this SPI bus.
-      slaves  => 1,
-
-      --... and set the SPI communications word size.
-      d_width => 8
-    )
-    port map(
-      clock   => clk,
-
-      -- Control signals.
-      reset_n => not reset,
-      enable  => initiate_transaction,
-
-      --SPI signals
-      sclk    => flash_sck,
-      ss_n(0) => flash_cs,
-      miso    => flash_miso,
-      mosi    => flash_mosi,
-
-      --Always talk to the first device, which is at address 0.
-      addr    => 0,
-
-      --And set the fastest SPI clock rate possible.
-      clk_div => 32,
-
-      --Clock polarity and phase.
-      cpol    => '0',
-      cpha    => '0',
-
-      --Parallel data in and out of the SPI master.
-      tx_data => spi_transmit_queue(0),
-      rx_data => received_data,
-
-      --Status flags.
-      busy    => spi_is_busy,
-      cont    => continue_transaction
-    );
-
-    
-    --
-    -- Rising edge detect for the SPI "busy" signal. 
-    -- Used to determine when to move to the next instruction.
-    --
-    spi_was_busy      <= spi_is_busy when rising_edge(clk);
-    spi_data_accepted <= spi_is_busy and not spi_was_busy;
-    spi_data_complete <= not spi_is_busy and spi_was_busy;
-
     --
     -- Main controller flags.
     --
     bootstrap_complete <= not bootstrap_in_progress;
 
-    --
-    -- Simple queueing transmitter: allows sequences of bytes to be transmitted via SPI.
-    -- 
-    QUEUEING_TRANSMITTER:
-    process(clk)
-    begin
-      if rising_edge(clk) then
+    --DEBUG
+    transact_enable <= spi_transmit_complete;
+    busy <= spi_ready_for_new_transmission;
 
-        --If the main state machine is requesting that we enqueue
-        --a new set of data, do so.
-        if spi_request_enqueue = '1' then
-          spi_transmit_queue  <= spi_data_to_queue;
-          spi_bytes_remaining <= spi_bytes_to_queue;
-
-        --Otherwise, if the SPI transmtter subsystem has accepted our data...
-        elsif spi_data_accepted = '1' then
-
-          --...move on to transmitting the next byte...
-          spi_transmit_queue <= spi_transmit_queue(1 to spi_transmit_queue'high) & x"00";
-
-          --... and decrease the number of bytes to be transmitted 
-          if spi_bytes_remaining > 0 then
-            spi_bytes_remaining <= spi_bytes_remaining - 1;
-          else
-             
-          end if;
-
-        end if;
-
-      end if;
-    end process;
-
-    --Signal which indicates when a queued transmission has completed. See the disclaimer at the signal's definition.
-    spi_queued_transmit_complete <= '1' when spi_bytes_remaining = 0 and spi_data_complete = '1' else '0';
 
     --
     -- Main controller FSM for the whole device.
     --
     CONTROLLER:
     process(clk)
+    
+      --
+      --Shorthand procedure which enqueues a set of bytes to be transmitted.
+      -- command: The command to enqueue, as a collection of ordered bytes.
+      -- starts_transaction: True iff the given transmission should start a transaction.
+      procedure spi_transmit(command : in byte_vector) is
+      begin
+        spi_request_enqueue                  <= '1';
+        spi_transmission_length              <= command'length;
+        spi_data_to_transmit(command'range)  <= command;
+      end procedure;
+
+      --
+      -- Function which determines the SPI flash address for the given page number,
+      -- where each page is a 4KiB flash page.
+      --
+      impure function address_for_page_number(page_number : integer) return byte_vector is
+        variable target_address : unsigned(23 downto 0);
+        variable address_vector : std_ulogic_vector(23 downto 0);
+      begin
+        --Compute the target address. 
+        target_address := unsigned(start_address) + (KILOBYTES_PER_PAGE * 1024 * page_number);
+        
+        --...and convert it to std_ulogic_vector...
+        address_vector := std_ulogic_vector(target_address);
+
+        --... and then into a vector of bytes.
+        return (address_vector(23 downto 16), address_vector(15 downto 8), address_vector(7 downto 0));
+
+      end function;
+
+
     begin
       if rising_edge(clk) then
 
+        --Synchronous reset.
         if reset = '1' then
           state <= STARTUP;
         else
 
-          --Keep the following signals low unless explicitly assertd.
-          initiate_transaction            <= '0';
-          continue_transaction            <= '0';
-          bootstrap_write_to_local_memory <= '0';
-          clear_local_memory              <= '0';
-          spi_request_enqueue             <= '0';
+          --Keep the following signals low unless explicitly asserted.
+          spi_receive                       <= '0';
+          bootstrap_write_to_local_memory   <= '0';
+          clear_local_memory                <= '0';
+          spi_request_enqueue               <= '0';
+
+          --Provide default values for the queuing transmitter data lines;
+          --this prevents us from needlessly inferring a memory.
+          spi_data_to_transmit              <= (others => x"00");
+          spi_transmission_length           <= 0;
+
 
           case state is
 
@@ -318,12 +321,12 @@ begin
             when STARTUP =>
 
               --Mark the bootstrap as "not yet complete"...
-              initiate_transaction  <= '0';
               bootstrap_in_progress <= '0';
 
               --Reset the total number of cycles waited.
               cycles_waited <= (others => '0');
 
+              --... and move to the initialization state.
               state <= WAIT_FOR_INITIALIZATION;
 
 
@@ -332,8 +335,6 @@ begin
             -- levels prior to the CS line going low.
             --
             when WAIT_FOR_INITIALIZATION =>
-
-              initiate_transaction <= '0';
 
               --Count the number of cycles waited...
               cycles_waited <= cycles_waited + 1;
@@ -358,15 +359,9 @@ begin
               --Start from the beginning of our local memory.
               bootstrap_memory_address <= (others => '0');
 
-              --Start an SPI transaction, and send the "fast read" command.
-              --initiate_transaction  <= '1';
-              continue_transaction  <= '1';
-
               --Request transmission of an SPI fast read from the device.
-              spi_request_enqueue <= '1';
-              spi_bytes_to_queue  <= COMMAND_READ_FROM_START'length;
-              spi_data_to_queue   <= COMMAND_READ_FROM_START;
-
+              spi_transmit(COMMAND_READ_FROM_START);
+              
               --... and then wait for the read to complete.
               state <= BOOTSTRAP_SEND_READ_COMMAND;
 
@@ -378,15 +373,11 @@ begin
             when BOOTSTRAP_SEND_READ_COMMAND =>
   
               --Mark this as a continued transaction: we'll continue 
-              continue_transaction <= '1';
+              --continue_transaction <= '1';
+              spi_receive <= '1';
 
-              --If this is the first byte in the transmission, ensure that
-              --we're attempting to initate a transmission.
-              if spi_bytes_remaining = COMMAND_READ_FROM_START'length then
-                initiate_transaction <= '1';
-
-              --Or, if we've just finished a transmission, continue bootstrapping.
-              elsif spi_queued_transmit_complete = '1' then
+              --Once we've finished a transmission, continue bootstrapping.
+              if spi_transmit_complete = '1' then
                 state <= BOOTSTRAP_POPULATE_MEMORY_LOW_BYTE;
               end if;
 
@@ -401,13 +392,13 @@ begin
             --
             when BOOTSTRAP_POPULATE_MEMORY_LOW_BYTE =>
 
-              continue_transaction <= '1';
+              spi_receive <= '1';
 
               --When we've recieved a given piece of data...
               if spi_data_complete = '1' then
 
                 --Place the data on the input of the local memory...
-                bootstrap_data_to_local_memory(7 downto 0) <= received_data;
+                bootstrap_data_to_local_memory(7 downto 0) <= spi_last_received_byte;
 
                 --... and continue to populate the memory's high byte.
                 state <= BOOTSTRAP_POPULATE_MEMORY_HIGH_BYTE;
@@ -424,20 +415,19 @@ begin
             --
             when BOOTSTRAP_POPULATE_MEMORY_HIGH_BYTE =>
 
-              continue_transaction <= '1';
+              spi_receive <= '1';
 
               --When we've recieved a given piece of data...
               if spi_data_complete = '1' then
 
                 --Place the data on the input of the local memory, 
                 --and queue a local memory write.
-                bootstrap_data_to_local_memory(15 downto 8) <= received_data;
+                bootstrap_data_to_local_memory(15 downto 8) <= spi_last_received_byte;
                 bootstrap_write_to_local_memory  <= '1';
-
 
                 --If we're about to exceed the size of the memory, complete the boostrap
                 --and move on to the idle state.
-                if bootstrap_memory_address >= (memory_size * 1024 - 1) then
+                if bootstrap_memory_address >= HIGHEST_LOCAL_MEMORY_ADDRESS then
                   state <= IDLE;
 
                 --Otherwise, continue bootstrapping.
@@ -460,14 +450,112 @@ begin
             -- Idle state; waits for further instruction.
             --
             when IDLE =>
-
+              
               bootstrap_in_progress <= '0';
-              null;
+
+              --If a chip erase has been requested:
+              if erase = '1' then
+
+                --Disable write protection...
+                spi_transmit((0 => COMMAND_ENABLE_WRITE_TO_STATUS_REGISTER));
+
+                --... record the number of pages to be erased...
+                pages_to_erase <= memory_size_in_pages;
+
+                --... and move on to erasing the chip.
+                state <= CHIP_ERASE_DISABLE_WRITE_PROTECT;
+
+              end if;
 
 
+            --
+            -- State in which write 
+            --
+            when CHIP_ERASE_DISABLE_WRITE_PROTECT =>
+
+              --Once we're ready for the next transmission, continue with the appropriate command. 
+              if spi_ready_for_new_transmission = '1' then
+
+                --Disable write protection...
+                spi_transmit(COMMAND_DISABLE_WRITE_PROTECTION);
+
+                --... and move on to erasing the chip.
+                state <= CHIP_ERASE_WRITE_ENABLE;
+
+
+              end if;
+
+            --
+            -- Waits for the SPI transmit line to be free,
+            -- and then queues a write enable.
+            --
+            when CHIP_ERASE_WRITE_ENABLE =>
+
+              --Wait for the SPI bus to be free.
+              if spi_ready_for_new_transmission = '1' then
+                
+                --... queue a transmit of the "write enable" command...
+                spi_transmit((0 => COMMAND_WRITE_ENABLE));
+
+                --... and continue to the erase page.
+                cycles_waited <= (others => '0');
+                state <= CHIP_ERASE_ERASE_PAGE;
+
+              end if;
+
+
+
+            --
+            -- Perform an ordered "chip erase" by erasing the relevant
+            -- SPI flash region, which starts at the provided "start_address"
+            -- and extends for n-kilobytes.
+            --
+            when CHIP_ERASE_ERASE_PAGE =>
+
+
+              if spi_ready_for_new_transmission = '1' then
+
+                --Transmit the command to erase the given page, and...
+                spi_transmit(COMMAND_ERASE_FOUR_KILOBYTES & address_for_page_number(pages_to_erase - 1));
+
+                --... and move to the next "write enable" state.
+                state <= CHIP_ERASE_WAIT_FOR_ERASE;
+
+                --... and decrease the total pages to erase.
+                pages_to_erase <= pages_to_erase - 1;
+
+              end if;
+
+
+            --
+            -- Wait for the flash to complete the chip erase.
+            --
+            -- In this case, we wait the maximum erasure time
+            -- as specified in the datasheet. This could
+            -- potentially be improved by polling for the write
+            -- status, if necessary for the given applicaiton.
+            --
+            when CHIP_ERASE_WAIT_FOR_ERASE =>
+
+              --Count the number of waited cycles...
+              cycles_waited <= cycles_waited + 1;
+
+              --If we've waitedd for longer than the sector erase time,
+              --move to the next state, as appropriate.
+              if cycles_waited > CYCLES_FOR_FOUR_KILOBYTE_ERASE then
+
+                --If we have pages left to erase, continue the erasure.
+                if pages_to_erase > 0 then 
+                  state <= CHIP_ERASE_WRITE_ENABLE;
+
+                --Otherwise, move back to the idle state.
+                else
+                  state <= IDLE;
+                end if;
+
+              end if;
 
           end case;
-
 
         end if;
       end if;
