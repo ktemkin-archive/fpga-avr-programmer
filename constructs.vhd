@@ -15,7 +15,10 @@ use ieee.std_logic_1164.all;
 package constructs is
 
   subtype byte is std_ulogic_vector(7 downto 0);
+  subtype word is std_ulogic_vector(15 downto 0);
+
   type byte_vector is array(natural range <>) of byte;
+  type word_vector is array(natural range <>) of word;
 
 
   type programmer_id is array(0 to 6) of byte;

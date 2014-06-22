@@ -72,9 +72,9 @@ entity spi_program_memory is
     --The address to be affected.
     address : in std_ulogic_vector(15 downto 0);
 
-    --TODO: Replace me with a word type?
-    data_in  : in std_ulogic_vector(15 downto 0);
-    data_out : out std_ulogic_vector(15 downto 0);
+    --Data in and out.
+    data_in  : in  word;
+    data_out : out word;
 
     --Status flags.
     bootstrap_complete : out std_ulogic := '0';
